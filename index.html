@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Genesis Evolution – AI World Engine v3</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#060616;overflow:hidden;font-family:"Inter",Arial,sans-serif;}
+  canvas{display:block;width:100%;height:100%;touch-action:none;background:radial-gradient(circle,#32005a 0%,#000 80%);}
+  #hud{position:fixed;top:14px;left:18px;color:#fff;font-size:15px;text-shadow:0 0 4px rgba(255,255,255,.3);}
+  #effBar{position:fixed;bottom:60px;left:18px;width:220px;height:18px;background:rgba(255,255,255,.12);border-radius:9px;}
+  #effFill{height:100%;width:100%;background:#00e4b8;border-radius:9px;}
+  #tapPrompt{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:20px;color:#aaa;background:rgba(0,0,0,.6);padding:12px 24px;border-radius:12px;text-shadow:0 0 4px #0ff;}
+  #aiPrompt{position:fixed;bottom:20px;left:18px;width:220px;padding:8px;border-radius:8px;border:none;font-size:14px;background:rgba(255,255,255,.08);color:#fff;}
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+<div id="hud">Mass: <span id="mass">10</span>  Score: <span id="score">0</span>  Lvl: <span id="level">1</span></div>
+<div id="effBar"><div id="effFill"></div></div>
+<div id="tapPrompt">Tap to Start 🎵</div>
+<input id="aiPrompt" type="text" placeholder="Type world command…">
+
+<audio id="backgroundMusic" loop preload="auto">
+  <source src="https://barnickelus.github.io/GenesisGame/background-music.mp3" type="audio/mpeg">
+</audio>
+
+<script>
+/* ===== Canvas & camera ===== */
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+let W,H;
+function resize(){W=canvas.width=innerWidth;H=canvas.height=innerHeight;}
+addEventListener('resize',resize);resize();
+
+/* ===== Game objects ===== */
+const world={size:2000,tile:50};
+const player={x:0,y:0,r:15,mass:10,tail:[],speed:250,maxSpeed:250};
+let target={x:0,y:0};                 // world-space target
+let food=[],opponents=[],hazards=[];
+let level=1,score=0;
+
+/* ===== Spawn helpers ===== */
+function randRange(min,max){return Math.random()*(max-min)+min;}
+function spawnFood(n=1,aroundPlayer=false){
+  for(let i=0;i<n;i++){
+    food.push({
+      x:aroundPlayer?player.x+randRange(-400,400):randRange(-world.size,world.size),
+      y:aroundPlayer?player.y+randRange(-400,400):randRange(-world.size,world.size),
+      r:randRange(5,10)
+    });
+  }
+}
+function spawnPredator(){
+  opponents.push({
+    x:player.x+randRange(-400,400),
+    y:player.y+randRange(-400,400),
+    r:player.r*1.5
+  });
+}
+function spawnHazard(type){
+  hazards.push({
+    x:player.x+randRange(-400,400),
+    y:player.y+randRange(-400,400),
+    r:150,
+    type
+  });
+}
+
+/* ===== Input ===== */
+function screenToWorld(clientX,clientY){
+  const rect=canvas.getBoundingClientRect();
+  return {x:clientX-rect.left-(W/2-player.x),y:clientY-rect.top-(H/2-player.y)};
+}
+function setTarget(e){
+  e.preventDefault();
+  const p=e.touches?e.touches[0]:e;
+  target=screenToWorld(p.clientX,p.clientY);
+}
+canvas.addEventListener('touchstart',setTarget,{passive:false});
+canvas.addEventListener('touchmove',setTarget,{passive:false});
+canvas.addEventListener('mousedown',setTarget);
+canvas.addEventListener('mousemove',e=>{if(e.buttons) setTarget(e)});
+
+/* ===== Drawing ===== */
+function drawCircle(o,col,alpha=1){
+  ctx.globalAlpha=alpha;ctx.fillStyle=col;
+  ctx.beginPath();ctx.arc(o.x,o.y,o.r,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+}
+function drawGrid(){
+  ctx.strokeStyle='#222';ctx.lineWidth=1;
+  for(let i=-world.size;i<=world.size;i+=world.tile){
+    ctx.beginPath();ctx.moveTo(i,-world.size);ctx.lineTo(i,world.size);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(-world.size,i);ctx.lineTo(world.size,i);ctx.stroke();
+  }
+}
+
+/* ===== Game loop ===== */
+let last=performance.now(),foodTimer=0;
+function loop(now){
+  const dt=(now-last)/1000;last=now;          // seconds
+  foodTimer+=dt;
+  if(foodTimer>0.2){spawnFood(1);foodTimer=0;}
+
+  /* --- player movement --- */
+  const dx=target.x-player.x,dy=target.y-player.y,dist=Math.hypot(dx,dy);
+  const maxSpeed=player.maxSpeed*(hazards.some(h=>h.type==='slow'&&Math.hypot(player.x-h.x,player.y-h.y)<h.r)?0.5:1);
+  if(dist>1){
+    player.x+=dx/dist*maxSpeed*dt;
+    player.y+=dy/dist*maxSpeed*dt;
+    player.mass-=0.5*dt; // baseline energy burn
+  }
+  player.x=Math.max(-world.size+player.r,Math.min(world.size-player.r,player.x));
+  player.y=Math.max(-world.size+player.r,Math.min(world.size-player.r,player.y));
+
+  /* --- interactions --- */
+  food.forEach((f,i)=>{
+    if(Math.hypot(player.x-f.x,player.y-f.y)<player.r+f.r){
+      player.mass+=f.r;food.splice(i,1);
+    }
+  });
+  opponents.forEach((o,i)=>{
+    const d=Math.hypot(player.x-o.x,player.y-o.y);
+    const chase=player.r>o.r? -1: 1;
+    o.x+= (player.x-o.x)/d*100*dt*chase;
+    o.y+= (player.y-o.y)/d*100*dt*chase;
+    if(d<Math.max(player.r,o.r)){
+      if(player.r>o.r){player.mass+=o.r/2;opponents.splice(i,1);}
+      else player.mass-=20*dt;
+    }
+  });
+  hazards.forEach(h=>{
+    if(Math.hypot(player.x-h.x,player.y-h.y)<h.r){
+      if(h.type==='poison')player.mass-=50*dt;
+    }
+  });
+
+  /* --- derived stats --- */
+  player.r=10+player.mass/15;
+  player.tail.unshift({x:player.x,y:player.y});
+  if(player.tail.length>150)player.tail.pop();
+
+  /* --- level / score --- */
+  if(player.mass/100+1>level){level++;spawnPredator();}
+  score+=player.mass*dt*0.1;
+
+  /* --- camera --- */
+  ctx.setTransform(1,0,0,1, W/2-player.x, H/2-player.y);
+  ctx.clearRect(player.x-W/2-50,player.y-H/2-50,W+100,H+100);
+
+  /* --- render --- */
+  drawGrid();
+  food.forEach(f=>drawCircle(f,'#ff0'));
+  hazards.forEach(h=>drawCircle(h,h.type==='poison'?'#a00':'#0cf',0.3));
+  opponents.forEach(o=>drawCircle(o,'#f00'));
+  player.tail.forEach((t,i)=>drawCircle(t,'#00e4b8',0.6-i/player.tail.length));
+  drawCircle(player,'#00e4b8');
+
+  /* --- HUD --- */
+  document.getElementById('mass').textContent=player.mass.toFixed(0);
+  document.getElementById('score').textContent=Math.floor(score);
+  document.getElementById('level').textContent=level;
+  document.getElementById('effFill').style.width=((maxSpeed/player.maxSpeed)*100|0)+'%';
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ===== Command parser ===== */
+const cmdBox=document.getElementById('aiPrompt');
+cmdBox.addEventListener('keydown',e=>{
+  if(e.key!=='Enter')return;
+  const cmd=e.target.value.trim().toLowerCase();
+  if(cmd.includes('more')&&cmd.includes('food')) spawnFood(30,true);
+  else if(cmd.includes('predator')) spawnPredator();
+  else if(cmd.includes('peace')){opponents.length=0;spawnFood(50,true);}
+  else if(cmd.match(/poison|danger/)) spawnHazard('poison');
+  else if(cmd.match(/freeze|slow/))   spawnHazard('slow');
+  else if(cmd.match(/shrink/)) world.size=Math.max(600,world.size-400);
+  else if(cmd.match(/regrow|expand/)) world.size=Math.min(2000,world.size+400);
+  else if(cmd.match(/night/)) canvas.style.background='radial-gradient(circle,#000 0%,#000 100%)';
+  else if(cmd.match(/day/))   canvas.style.background='radial-gradient(circle,#32005a 0%,#000 80%)';
+  e.target.value='';
+});
+
+/* ===== Music kick-off ===== */
+function startMusic(){
+  document.getElementById('tapPrompt')?.remove();
+  const bg=document.getElementById('backgroundMusic');
+  bg.volume=1;bg.play().catch(()=>{});
+}
+addEventListener('click',startMusic,{once:true});
+addEventListener('touchend',startMusic,{once:true});
+</script>
+</body>
+</html>
