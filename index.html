@@ -9,13 +9,15 @@
     html,body{margin:0;height:100%;background:#060616;overflow:hidden;font-family:"Inter",Arial,sans-serif;}
     canvas{width:100%;height:100%;display:block;touch-action:none;
            background:radial-gradient(circle at center,#32005a 0%,#000 85%);}
-    #hud{position:fixed;top:14px;left:18px;z-index:2;color:#fff;font-size:15px;text-shadow:0 0 4px rgba(255,255,255,.3);}
-    #compass{position:fixed;top:60px;left:18px;z-index:2;color:#aaa;font-size:12px;line-height:12px;
-             letter-spacing:1px;text-shadow:0 0 2px #000;}
+    #hud{position:fixed;top:14px;left:18px;color:#fff;font-size:15px;text-shadow:0 0 4px rgba(255,255,255,.3);z-index:2;}
+    #compass{position:fixed;top:60px;left:18px;color:#aaa;font-size:12px;line-height:12px;
+             letter-spacing:1px;text-shadow:0 0 2px #000;z-index:2;}
     #effBar{position:fixed;bottom:14px;left:18px;width:220px;height:18px;border-radius:9px;
             background:rgba(255,255,255,.12);z-index:2;}
     #effFill{width:100%;height:100%;border-radius:9px;background:#00e4b8;}
-    #pauseBtn{position:fixed;top:14px;right:18px;z-index:2;font-size:22px;color:#fff;cursor:pointer;user-select:none;}
+    #pauseBtn{position:fixed;top:14px;right:18px;font-size:22px;color:#fff;cursor:pointer;user-select:none;z-index:2;}
+    #radarWrap{position:fixed;top:48px;right:18px;width:70px;height:70px;display:none;z-index:2;}
+    #radar{width:70px;height:70px;border:1px solid #555;border-radius:4px;background:rgba(0,0,0,.4);}
   </style>
 </head>
 <body>
@@ -26,37 +28,56 @@
 <div id="effBar"><div id="effFill"></div></div>
 <div id="pauseBtn">⏸︎</div>
 
+<div id="radarWrap"><canvas id="radar" width="70" height="70"></canvas></div>
+
 <audio id="backgroundMusic" src="background-music.mp3" loop preload="auto"></audio>
 
 <script>
-/* ===== CONFIG ===== */
-const PILL_COLORS  = ["#00aaff","#ff39ff"];   // pulse colors
-const MASS_THRESH  = 600;                     // larger red foes
-const TITAN_LEVEL  = 10;                      // level unlock
-const TITAN_MAX    = 6;                       // more titans
-const TITAN_RESPAWN_MS = 20000;               // new wave every 20 s
-const PERFECT_BONUS = lvl => Math.min(400, Math.floor(40*Math.sqrt(lvl)));  // gentle bonus
+/* ===== CONSTANTS ===== */
+const MASS_THRESH=600,
+      TITAN_LEVEL=10,
+      TITAN_MAX=6,
+      TITAN_RESPAWN_MS=20000,
+      SPECTRE_MAX=3,
+      REAPER_MAX=3,
+      AMOEBA_MAX=6,
+      C_RING_DIST=1600;
+
+const TARGET_SCREEN_RADIUS=140,  // px of on-screen radius we try to keep
+      MIN_ZOOM=0.35;
+
+const PILL_COLORS=["#00aaff","#ff39ff"];
+const COLORS=["#00e4b8","#0ff","#00faff","#22e"];
+
+const PERFECT_BONUS=lvl=>Math.min(400,Math.floor(40*Math.sqrt(lvl)));
+const FRENZY_BONUS_SCALE=0.4;
+const SPECTRE_SPEED_MS=6000,
+      SPECTRE_SPEED_MULT=1.25;
 
 /* ===== CANVAS ===== */
 const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
-let W,H; function resize(){ W=canvas.width=innerWidth; H=canvas.height=innerHeight;} resize(); addEventListener('resize',resize);
+let W,H;function resize(){W=canvas.width=innerWidth;H=canvas.height=innerHeight;}resize();addEventListener('resize',resize);
 
 /* ===== HUD refs ===== */
-const massEl=document.getElementById('mass'),scoreEl=document.getElementById('score'),levelEl=document.getElementById('level'),pauseBtn=document.getElementById('pauseBtn');
+const massEl=document.getElementById('mass'),scoreEl=document.getElementById('score'),levelEl=document.getElementById('level');
+const pauseBtn=document.getElementById('pauseBtn');
+const radarWrap=document.getElementById('radarWrap'),radar=document.getElementById('radar'),rctx=radar.getContext('2d');
 
-/* ===== PLAYER ===== */
-let player={x:0,y:0,r:15,mass:10,tail:[],baseSpeed:2.5,blink:0};
+/* ===== PLAYER & WORLD ===== */
+let player={x:0,y:0,r:15,mass:10,tail:[],baseSpeed:2.5,blink:0,speedBoost:0};
 let target={x:0,y:0,active:false};
-let offset={x:W/2,y:H/2};
 
-/* ===== ENTITIES ===== */
-const food=[],foes=[],titans=[];
-const COLORS=["#00e4b8","#0ff","#00faff","#22e"];
+/* entity arrays */
+const food=[],foes=[],titans=[],spectres=[],reapers=[],amoebas=[],beacons=[];
 let pill={x:0,y:0,r:10,active:false,cd:0};
-let frenzy=false,F_TIME=0,frenzyOrbsLeft=0,bonusFlash=0;
-let paused=false;
 
-/* ===== UTILS ===== */
+let frenzy=false,F_TIME=0,frenzyOrbsLeft=0,bonusFlash=0;
+let paused=false,radarActive=false;
+
+/* counters */
+let titanTimer=0,titanKill=0,spectreKill=0;
+
+/* ===== UTIL ===== */
 const rand=v=>Math.random()*v-v/2;
 const dist=(ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
 const lerp=(a,b,t)=>a+(b-a)*t;
@@ -66,48 +87,69 @@ function mixHex(a,b,t){const A=rgb(a),B=rgb(b);return`rgb(${Math.round(lerp(A.r,
 /* ===== SPAWNERS ===== */
 for(let i=0;i<60;i++)food.push({x:rand(1800),y:rand(1800),r:6});
 for(let i=0;i<12;i++)spawnFoe();
+['N','S','E','W'].forEach(dir=>{
+  const pos={N:[0,-C_RING_DIST],S:[0,C_RING_DIST],E:[C_RING_DIST,0],W:[-C_RING_DIST,0]}[dir];
+  beacons.push({x:pos[0],y:pos[1],r:18});
+});
 function spawnFoe(){foes.push({x:rand(2000),y:rand(2000),r:(player.mass>=MASS_THRESH?14:10)+Math.random()*20});}
-function spawnTitan(){                     // 700–1200 px ring
-  const a=Math.random()*Math.PI*2,d=700+Math.random()*500;
-  titans.push({x:player.x+Math.cos(a)*d,y:player.y+Math.sin(a)*d,r:25+Math.random()*35,hop:0});
-}
+function spawnTitan(){const a=Math.random()*Math.PI*2,d=700+Math.random()*500;titans.push({x:player.x+Math.cos(a)*d,y:player.y+Math.sin(a)*d,r:25+Math.random()*35,hop:0});}
+function spawnSpectre(){const a=Math.random()*Math.PI*2,d=600+Math.random()*400;spectres.push({x:player.x+Math.cos(a)*d,y:player.y+Math.sin(a)*d,r:22+Math.random()*25,dash:0});}
+function spawnReaper(){const a=Math.random()*Math.PI*2,d=800+Math.random()*600;reapers.push({x:player.x+Math.cos(a)*d,y:player.y+Math.sin(a)*d,r:38+Math.random()*28,charge:0});}
+function spawnAmoeba(r=30,x=rand(2000),y=rand(2000)){amoebas.push({x,y,r,phase:Math.random()*Math.PI*2});}
 function spawnPill(){pill={x:rand(1800),y:rand(1800),r:10,active:true,cd:0};}
 
 /* ===== INPUT ===== */
 canvas.addEventListener("pointerdown",e=>{if(!paused){setT(e);target.active=true;}});
 canvas.addEventListener("pointermove",e=>{if(target.active&&!paused)setT(e);});
 canvas.addEventListener("pointerup",()=>target.active=false);
-function setT(p){target.x=p.clientX-offset.x;target.y=p.clientY-offset.y;}
+function setT(p){target.x=p.clientX-W/2;target.y=p.clientY-H/2;}
 
 /* ===== PAUSE ===== */
 pauseBtn.onclick=()=>{paused=!paused;pauseBtn.textContent=paused?"▶︎":"⏸︎";
-  const m=document.getElementById('backgroundMusic');if(m)paused?m.pause():m.play().catch(()=>{});};
+  const m=document.getElementById('backgroundMusic');if(m)paused?m.pause():m.play().catch(()=>{});} ;
 
 /* ===== GAME LOOP ===== */
-let last=0,level=1,flash=0,titanTimer=0;
+let last=0,level=1,flash=0;
 function loop(ts){
-  if(paused){requestAnimationFrame(loop);return;}
-  const dt=(ts-last)||16;last=ts;
+  if(paused){ last=ts; requestAnimationFrame(loop); return; }
+  const dt=(ts-last)||16; last=ts;
 
-  /* Move player */
-  const dx=(target.active?target.x:player.x)-player.x,dy=(target.active?target.y:player.y)-player.y,d=Math.hypot(dx,dy);
-  if(d>1){const sp=player.baseSpeed*(1+0.1*(level-1))*(frenzy?1.3:1);player.x+=dx/d*sp;player.y+=dy/d*sp;}
+/* --- movement --- */
+  const dx=(target.active?target.x:0)-player.x,
+        dy=(target.active?target.y:0)-player.y,
+        dlen=Math.hypot(dx,dy);
 
-  /* Decay (softer big) */
+  if(player.speedBoost>0)player.speedBoost=Math.max(0,player.speedBoost-dt);
+  const boostFactor=(player.speedBoost>0?SPECTRE_SPEED_MULT:1)*(frenzy?1.3:1);
+
+  if(dlen>1){
+    const sp=player.baseSpeed*(1+0.1*(level-1))*boostFactor;
+    player.x+=dx/dlen*sp;
+    player.y+=dy/dlen*sp;
+  }
+
+/* --- mass decay --- */
   const decayRaw=0.000009*player.r*player.r+(player.mass<150?0.002:0.003);
-  const decay=Math.min(decayRaw,0.08);
-  player.mass=Math.max(5,player.mass-decay*dt);
+  player.mass=Math.max(5,player.mass-Math.min(decayRaw,0.08)*dt);
 
-  /* Food */
+/* --- food pick-up & perfect-frenzy bonus --- */
   for(let i=food.length-1;i>=0;i--){const f=food[i];
     if(dist(player.x,player.y,f.x,f.y)<player.r+f.r){
       player.mass+=f.r*(f.frenzy?0.6:1.2);
-      if(f.frenzy)frenzyOrbsLeft--;
+      if(f.frenzy){
+        frenzyOrbsLeft--;
+        if(frenzyOrbsLeft===0){
+          const secs=Math.max(1,Math.ceil(F_TIME/1000));
+          player.mass+=PERFECT_BONUS(level)*secs*FRENZY_BONUS_SCALE;
+          bonusFlash=60;
+        }
+      }
       food.splice(i,1);
-    }}
+    }
+  }
   while(food.length<60)food.push({x:rand(1800),y:rand(1800),r:6});
 
-  /* Red foes */
+/* --- regular foes --- */
   while(foes.length<(player.mass>=MASS_THRESH?18:12))spawnFoe();
   foes.forEach((o,i)=>{
     const d=dist(player.x,player.y,o.x,o.y);
@@ -118,59 +160,121 @@ function loop(ts){
     else if(o.r>player.r&&d<250){o.x+=(player.x-o.x)/d*c;o.y+=(player.y-o.y)/d*c;}
   });
 
-  /* Titans */
+/* --- titans --- */
   if(level>=TITAN_LEVEL){
     while(titans.length<TITAN_MAX)spawnTitan();
-    titanTimer+=dt;if(titanTimer>TITAN_RESPAWN_MS){titanTimer=0;titans.length=0;} /* wave reset */
+    titanTimer+=dt;if(titanTimer>TITAN_RESPAWN_MS){titanTimer=0;titans.length=0;}
   }
   titans.forEach((o,i)=>{
     o.hop-=dt;
     const d=dist(player.x,player.y,o.x,o.y);
-    if(d>2000){titans.splice(i,1);spawnTitan();return;}     /* teleport back */
-    if(player.r>o.r&&d<player.r){player.mass+=o.r*4;titans.splice(i,1);return;}
+    if(d>2000){titans.splice(i,1);spawnTitan();return;}
+    if(player.r>o.r&&d<player.r){player.mass+=o.r*5;titans.splice(i,1);titanKill++;return;}
     if(o.r>player.r&&d<o.r){player.mass=Math.max(5,player.mass-0.1*dt);player.blink=500;}
     if(o.hop<=0){o.hop=700;const hop=o.r>player.r?120:-80;o.x+=(player.x-o.x)/d*hop;o.y+=(player.y-o.y)/d*hop;}
   });
 
-  /* Pill / Frenzy */
+/* --- spectres & reapers --- */
+  if(titanKill>=10)while(spectres.length<SPECTRE_MAX)spawnSpectre();
+  spectres.forEach((s,i)=>{
+    s.dash-=dt;
+    const d=dist(player.x,player.y,s.x,s.y);
+    if(d>2200){spectres.splice(i,1);spawnSpectre();return;}
+    if(player.r>s.r&&d<player.r){
+      player.mass+=s.r*7;player.speedBoost=SPECTRE_SPEED_MS;
+      spectres.splice(i,1);spectreKill++;
+      if(spectreKill%6===0 && reapers.length<REAPER_MAX)spawnReaper();
+      return;
+    }
+    if(s.r>player.r&&d<s.r){player.mass=Math.max(5,player.mass-0.2*dt);player.blink=600;}
+    if(s.dash<=0){s.dash=400;const jump=s.r>player.r?160:-100;s.x+=(player.x-s.x)/d*jump;s.y+=(player.y-s.y)/d*jump;}
+  });
+  reapers.forEach((r,i)=>{
+    r.charge-=dt;
+    const d=dist(player.x,player.y,r.x,r.y);
+    if(d>2400){reapers.splice(i,1);return;}
+    if(player.r>r.r&&d<player.r){player.mass+=r.r*10;reapers.splice(i,1);return;}
+    if(r.r>player.r&&d<r.r){player.mass=Math.max(5,player.mass-0.25*dt);player.blink=700;}
+    if(r.charge<=0){r.charge=300;const step=r.r>player.r?130:-100;r.x+=(player.x-r.x)/d*step;r.y+=(player.y-r.y)/d*step;}
+  });
+
+/* --- amoebas --- */
+  while(amoebas.length<AMOEBA_MAX)spawnAmoeba();
+  amoebas.forEach((a,i)=>{
+    a.phase+=dt*0.005;
+    const wobble=Math.sin(a.phase)*2;
+    const d=dist(player.x,player.y,a.x,a.y);
+    if(player.r>a.r&&d<player.r){
+      player.mass+=a.r*3;
+      amoebas.splice(i,1);
+      if(a.r>12){  // split into two
+        for(let k=0;k<2;k++)spawnAmoeba(a.r*0.6,a.x+rand(60),a.y+rand(60));
+      }
+      return;
+    }
+    if(a.r>player.r&&d<a.r){player.mass=Math.max(5,player.mass-0.06*dt);player.blink=500;}
+    // slight drift toward player if bigger, away if smaller
+    const dir=(a.r>player.r?1:-1)*0.08;
+    a.x+=(player.x-a.x)*dir;
+    a.y+=(player.y-a.y)*dir;
+    a.drawR=a.r+wobble;
+  });
+
+/* --- beacons & radar toggle --- */
+  beacons.forEach((b,i)=>{
+    if(dist(player.x,player.y,b.x,b.y)<player.r+b.r){
+      beacons.length=0;radarActive=true;radarWrap.style.display="block";
+    }
+  });
+
+/* --- pill & frenzy --- */
   if(pill.active&&dist(player.x,player.y,pill.x,pill.y)<player.r+pill.r){
     frenzy=true;F_TIME=10000;pill.active=false;frenzyOrbsLeft=40;
-    for(let i=0;i<40;i++){const a=Math.random()*Math.PI*2,r=120+Math.random()*120;
-      food.push({cx:player.x,cy:player.y,ang:a,baseR:r,angV:0.004+Math.random()*0.003,x:player.x+Math.cos(a)*r,y:player.y+Math.sin(a)*r,r:5,frenzy:true,col:COLORS[~~(Math.random()*COLORS.length)]});}
-  }
-  if(frenzy){
-    F_TIME-=dt;
-    if(F_TIME<=0){frenzy=false;
-      if(frenzyOrbsLeft===0){player.mass+=PERFECT_BONUS(level);bonusFlash=60;}
-      food.forEach(f=>f.frenzy=false);
+    for(let i=0;i<40;i++){
+      const a=Math.random()*Math.PI*2,r=120+Math.random()*120;
+      food.push({cx:player.x,cy:player.y,ang:a,baseR:r,angV:0.004+Math.random()*0.003,x:player.x+Math.cos(a)*r,y:player.y+Math.sin(a)*r,r:5,frenzy:true,col:COLORS[~~(Math.random()*COLORS.length)]});
     }
   }
+  if(frenzy){F_TIME-=dt;if(F_TIME<=0){frenzy=false;food.forEach(f=>f.frenzy=false);} }
   food.forEach(f=>{if(f.frenzy){f.ang+=f.angV*dt;f.x=f.cx+Math.cos(f.ang)*f.baseR;f.y=f.cy+Math.sin(f.ang)*f.baseR;}});
 
-  /* Respawn pill */
   if(!pill.active&&!frenzy){pill.cd+=dt;if(pill.cd>25000+Math.random()*10000)spawnPill();}
 
-  /* Size & level */
+/* --- size, level, tail --- */
   player.r=10+player.mass/15;
   player.tail.unshift({x:player.x,y:player.y});if(player.tail.length>player.mass/3)player.tail.pop();
   const newLv=Math.floor(player.mass/100)+1;if(newLv>level){level=newLv;flash=30;}
   if(player.blink>0)player.blink-=dt;
 
-  /* Camera */
-  offset.x=W/2-player.x;offset.y=H/2-player.y;
-  ctx.setTransform(1,0,0,1,offset.x,offset.y);
-  ctx.clearRect(-offset.x,-offset.y,W,H);
+/* --- CAMERA with zoom --- */
+  const zoom=Math.max(MIN_ZOOM,Math.min(1,TARGET_SCREEN_RADIUS/player.r));
+  ctx.setTransform(zoom,0,0,zoom,W/2-player.x*zoom,H/2-player.y*zoom);
+  ctx.clearRect(-W/zoom/2,-H/zoom/2,W/zoom,H/zoom);
 
-  /* Draw everything */
+/* --- DRAW WORLD --- */
   drawTesseract();
   food.forEach(f=>drawGlow(f.x,f.y,f.r,f.frenzy?f.col:"#ff0",f.frenzy?0.8:0.65));
-  if(pill.active){const phase=(Math.sin(ts*0.005)+1)/2;drawGlow(pill.x,pill.y,pill.r,mixHex(PILL_COLORS[0],PILL_COLORS[1],phase),0.95);}
+  if(pill.active){const ph=(Math.sin(ts*0.005)+1)/2;drawGlow(pill.x,pill.y,pill.r,mixHex(PILL_COLORS[0],PILL_COLORS[1],ph),0.95);}
   foes.forEach(o=>drawGlow(o.x,o.y,o.r,"#f00",0.8));
   titans.forEach(o=>drawGlow(o.x,o.y,o.r,"#cc00ff",0.9));
+  spectres.forEach(s=>{const ph=(Math.sin((ts+s.x)*0.006)+1)/2;drawGlow(s.x,s.y,s.r,mixHex("#ffde59","#ff39ff",ph),0.9);});
+  reapers.forEach(r=>{const ph=(Math.sin((ts+r.y)*0.004)+1)/2;drawGlow(r.x,r.y,r.r,mixHex("#ff8800","#ff39ff",ph),0.9);});
+  amoebas.forEach(a=>drawGlow(a.x,a.y,a.drawR||a.r,"#6affd9",0.85));
+  beacons.forEach(b=>{const ph=(Math.sin(ts*0.004)+1)/2;drawGlyphR(b.x,b.y,b.r*1.1,mixHex("#00e4ff","#ff39ff",ph));});
   player.tail.forEach((p,i)=>drawGlow(p.x,p.y,player.r*(1-i/player.tail.length),mixHex("#00e4b8","#ff39ff",i/player.tail.length),0.3));
   drawGlow(player.x,player.y,player.r,player.blink>0?(player.blink%200<100?"#fff":"#ff44ff"):"#00e4b8",1);
 
-  /* HUD */
+/* --- RADAR --- */
+  if(radarActive){
+    rctx.clearRect(0,0,70,70);rctx.strokeStyle="#666";rctx.lineWidth=1;
+    rctx.beginPath();rctx.moveTo(35,0);rctx.lineTo(35,70);rctx.moveTo(0,35);rctx.lineTo(70,35);rctx.stroke();
+    const maxCoord=Math.max(C_RING_DIST,Math.abs(player.x),Math.abs(player.y))||1;
+    const scale=(30-4)/maxCoord;
+    const rx=35+player.x*scale,ry=35+player.y*scale;
+    rctx.fillStyle="#00e4b8";rctx.beginPath();rctx.arc(rx,ry,3,0,Math.PI*2);rctx.fill();
+  }
+
+/* --- HUD --- */
   massEl.textContent=player.mass.toFixed(0);
   scoreEl.textContent=Math.floor(player.mass*10);
   levelEl.textContent=frenzy?`FRENZY ${Math.ceil(F_TIME/1000)}`:level;
@@ -180,21 +284,20 @@ function loop(ts){
 }
 requestAnimationFrame(loop);
 
-/* === Helpers === */
-function drawGlow(x,y,r,c,a){ctx.globalAlpha=a;ctx.shadowBlur=12;ctx.shadowColor=c;
-  ctx.fillStyle=c;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.globalAlpha=1;}
-function drawTesseract(){ctx.lineWidth=1.2;const step=120,depth=6;
-  for(let z=0;z<depth;z++){const s=1+z*0.15,o=0.8-0.12*z;ctx.strokeStyle=`rgba(34,34,34,${o})`;
+/* ===== DRAW HELPERS ===== */
+function drawGlow(x,y,r,c,a){ctx.globalAlpha=a;ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.globalAlpha=1;}
+function drawGlyphR(x,y,r,c){ctx.save();ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;ctx.font=`${r*2}px Inter`;ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText("R",x,y);ctx.shadowBlur=0;ctx.restore();}
+function drawTesseract(){ctx.lineWidth=1.2;const step=120,d=6;
+  for(let z=0;z<d;z++){const s=1+z*0.15,o=0.8-0.12*z;ctx.strokeStyle=`rgba(34,34,34,${o})`;
     for(let i=-4;i<=4;i++)for(let j=-4;j<=4;j++)cube(i*step*s,j*step*s,step*s);}
   function cube(x,y,s){ctx.beginPath();ctx.rect(x,y,s,s);ctx.stroke();
     ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-s*0.4,y-s*0.4);ctx.lineTo(x-s*0.4+s,y-s*0.4);ctx.lineTo(x+s,y);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(x+s,y);ctx.lineTo(x+s+s*0.4,y-s*0.4);
-    ctx.lineTo(x+s+s*0.4-s,y-s*0.4+s);ctx.lineTo(x+s,y+s);ctx.stroke();}
+    ctx.beginPath();ctx.moveTo(x+s,y);ctx.lineTo(x+s+s*0.4,y-s*0.4);ctx.lineTo(x+s+s*0.4-s,y-s*0.4+s);ctx.lineTo(x+s,y+s);ctx.stroke();}
 }
 
-/* === Music === */
+/* ===== MUSIC ===== */
 function startMusic(){const a=document.getElementById('backgroundMusic');if(a&&a.paused)a.play().catch(()=>{});}
-addEventListener('pointerdown',e=>{if(!paused)startMusic();},{once:true});
+addEventListener('pointerdown',()=>{if(!paused)startMusic();},{once:true});
 </script>
 </body>
 </html>
