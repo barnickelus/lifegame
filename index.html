@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Genesis Evolution – Neon Frenzy (v2)</title>
+<title>Genesis Evolution – Neon Frenzy (stable)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
@@ -19,150 +19,126 @@ canvas{width:100%;height:100%;display:block;touch-action:none;
 <div id="pause">⏸︎</div>
 
 <script>
-/* ---------- CONFIG ---------- */
-const CFG = {
-  worldSize   : 2000,           // +/- world coordinate bounds
-  cameraRadius: 140,            // target on-screen radius for the player
-  minZoom     : 0.35,
-  foodMax     : 60,
-  foeMax      : 12,
-  titan: { unlockLvl:10, max:6, respawn:20000 },
-  spectre: { unlockTitanKills:10, max:3 },
-  reaper: { unlockLvl:30, unlockTime:180000, spawnEvery:15, max:1 },   // << strict gate
+/* ======= CONFIG ======= */
+const CFG={
+  world:2000,
+  cameraR:140,
+  minZoom:0.35,
+  foodMax:60,
+  foeMax:12,
+  titan:{lvl:10,max:6,respawn:20000},
+  spectre:{titanKills:10,max:3},
+  reaper:{lvl:30,time:180000,spawnEvery:15,max:1}
 };
-/* ---------- UTIL ---------- */
-const rand=v=>Math.random()*v-v/2,
-      dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y),
-      mix=(a,b,t)=>a+(b-a)*t;
-function lerpCol(a,b,t){
-  const A=parseInt(a.slice(1),16),B=parseInt(b.slice(1),16);
-  const r=mix((A>>16)&255,(B>>16)&255,t)|0,g=mix((A>>8)&255,(B>>8)&255,t)|0,bv=mix(A&255,B&255,t)|0;
-  return`rgb(${r},${g},${bv})`;
-}
-/* ---------- CANVAS ---------- */
+const REAPER_DMG_RATE=0.05,REAPER_COOLDOWN=600,REAPER_STEP_BIG=45,REAPER_STEP_SMALL=-35;
+/* ======= CANVAS ======= */
 const cvs=document.getElementById('c'),ctx=cvs.getContext('2d');
-let W=innerWidth,H=innerHeight;const resize=()=>{W=cvs.width=innerWidth;H=cvs.height=innerHeight;};resize();addEventListener('resize',resize);
-/* ---------- HUD ---------- */
-const hudM=document.getElementById('m'),hudS=document.getElementById('s'),hudL=document.getElementById('l');
-const pauseBtn=document.getElementById('pause');
-/* ---------- ENTITY BASE ---------- */
-class Entity{
+let W,H;const resize=()=>{W=cvs.width=innerWidth;H=cvs.height=innerHeight;};resize();addEventListener('resize',resize);
+/* ======= HUD ======= */
+const mEl=document.getElementById('m'),sEl=document.getElementById('s'),lEl=document.getElementById('l'),pauseBtn=document.getElementById('pause');
+/* ======= UTIL ======= */
+const rand=v=>Math.random()*v-v/2,dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+/* ======= CAMERA ======= */
+const cam={z:1,update(r){this.z=Math.max(CFG.minZoom,Math.min(1,CFG.cameraR/r));}};
+/* ======= ENTITY BASE ======= */
+class Ent{
   constructor(x,y,r,col){this.x=x;this.y=y;this.r=r;this.col=col;}
-  draw(alpha=1){ctx.globalAlpha=alpha;ctx.shadowBlur=12;ctx.shadowColor=this.col;ctx.fillStyle=this.col;
+  draw(a=1){ctx.globalAlpha=a;ctx.shadowBlur=12;ctx.shadowColor=this.col;ctx.fillStyle=this.col;
     ctx.beginPath();ctx.arc(this.x,this.y,this.r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.globalAlpha=1;}
-  insideView(view){return Math.abs(this.x-player.x)<W/cam.z+300&&Math.abs(this.y-player.y)<H/cam.z+300;}
 }
-/* ---------- GAME STATE ---------- */
-const player={x:0,y:0,mass:10,r:15,tail:[],speed:2.5,blink:0,boost:0};
-let level=1,score=0,paused=false,time=0,reapersEnabled=false,reaperSpawnCounter=0;
-/* ---------- COLLECTIONS ---------- */
-const food=[],foes=[],titans=[],spectres=[],reapers=[],amoebas=[],beacons=[];
-/* ---------- CAMERA ---------- */
-const cam={z:1, update(){this.z=Math.max(CFG.minZoom,Math.min(1,CFG.cameraRadius/player.r));} };
-/* ---------- SPAWN HELPERS ---------- */
-const spawnFood=()=>food.push(new Entity(rand(CFG.worldSize),rand(CFG.worldSize),6,"#ff0"));
-const spawnFoe=()=>foes.push(new Entity(rand(CFG.worldSize),rand(CFG.worldSize),10+Math.random()*20,"#f00"));
-const spawnTitan=()=>{
-  const a=Math.random()*Math.PI*2,d=700+Math.random()*500;
-  titans.push(new Entity(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,25+Math.random()*35,"#c3f"));
-};
-const spawnSpectre=()=>{
-  const a=Math.random()*Math.PI*2,d=600+Math.random()*400;
-  const s=new Entity(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,24+Math.random()*20,"#ff39ff");
-  s.dash=0;s.baseCol=s.col;s.draw=()=>{const ph=(Math.sin((time+s.x)*0.006)+1)/2;s.col=lerpCol("#ffde59",s.baseCol,ph);Entity.prototype.draw.call(s);};
-  spectres.push(s);
-};
-const spawnReaper=()=>{
-  const a=Math.random()*Math.PI*2,d=900+Math.random()*600;
-  const r=new Entity(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,52,"#39f");
-  r.charge=0;reapers.push(r);
-};
-/* ---------- INITIAL POPULATE ---------- */
+/* ======= GAME STATE ======= */
+const player={x:0,y:0,mass:10,r:15,tail:[],speed:2.5};
+let level=1,score=0,time=0,paused=false,titanKill=0,spectreKill=0,reaperCounter=0,reapersEnabled=false;
+/* ======= ARRAYS ======= */
+const food=[],foes=[],titans=[],spectres=[],reapers=[];
+/* ======= SPAWNERS ======= */
+const spawnFood=()=>food.push(new Ent(rand(CFG.world),rand(CFG.world),6,"#ff0"));
+const spawnFoe=()=>foes.push(new Ent(rand(CFG.world),rand(CFG.world),10+Math.random()*20,"#f00"));
+const spawnTitan=()=>{const a=Math.random()*Math.PI*2,d=700+Math.random()*500;
+  titans.push(new Ent(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,25+Math.random()*35,"#c3f"));};
+const spawnSpectre=()=>{const a=Math.random()*Math.PI*2,d=600+Math.random()*400;
+  spectres.push(new Ent(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,24+Math.random()*20,"#ff39ff"));};
+const spawnReaper=()=>{const a=Math.random()*Math.PI*2,d=950+Math.random()*650;
+  reapers.push(new Ent(player.x+Math.cos(a)*d,player.y+Math.sin(a)*d,50,"#39f"));};
+/* initial */
 for(let i=0;i<CFG.foodMax;i++)spawnFood();
 for(let i=0;i<CFG.foeMax;i++)spawnFoe();
-/* ---------- INPUT ---------- */
+/* ======= INPUT ======= */
 let target={x:0,y:0,active:false};
 const toWorld=e=>({x:(e.clientX-W/2)/cam.z+player.x,y:(e.clientY-H/2)/cam.z+player.y});
-cvs.onpointerdown=e=>{if(!paused){target=Object.assign(toWorld(e),{active:true});}};
+cvs.onpointerdown=e=>{if(!paused)target=Object.assign(toWorld(e),{active:true});};
 cvs.onpointermove=e=>{if(target.active&&!paused)Object.assign(target,toWorld(e));};
 addEventListener('pointerup',()=>target.active=false);
-/* ---------- CORE LOOP ---------- */
+/* ======= DRAW HELPERS ======= */
+const drawTesseract=()=>{};  // stub – remove or replace with your grid if desired
+/* ======= LOOP ======= */
 let last=performance.now();
 function loop(ts){
   const dt=ts-last;last=ts;if(paused){requestAnimationFrame(loop);return;}time+=dt;
 
-  /* player move */
-  const dx=(target.active?target.x:player.x)-player.x,dy=(target.active?target.y:player.y)-player.y;
-  const len=Math.hypot(dx,dy);
-  if(len>1){const sp=player.speed*(1+0.1*(level-1))*(frenzy?1.3:1);player.x+=dx/len*sp;player.y+=dy/len*sp;}
-  /* decay & radius */
+  /* ----- movement & decay ----- */
+  const dx=(target.active?target.x:player.x)-player.x,dy=(target.active?target.y:player.y)-player.y,len=Math.hypot(dx,dy);
+  if(len>1){player.x+=dx/len*player.speed;player.y+=dy/len*player.speed;}
   const decay=0.000009*player.r*player.r+(player.mass<150?0.002:0.003);
   player.mass=Math.max(5,player.mass-decay*dt*0.0006);
   player.r=10+player.mass/15;score=Math.floor(player.mass*10);
+  const newLvl=Math.floor(player.mass/100)+1;if(newLvl>level)level=newLvl;
 
-  /* LEVEL */
-  const newLv=Math.floor(player.mass/100)+1;if(newLv>level)level=newLv;
+  /* ----- Reaper gate ----- */
+  if(!reapersEnabled&&level>=CFG.reaper.lvl&&time>=CFG.reaper.time)reapersEnabled=true;
 
-  /* REAPER unlock check */
-  if(!reapersEnabled&&level>=CFG.reaper.unlockLvl&&time>=CFG.reaper.unlockTime)reapersEnabled=true;
-
-  /* --- SPAWN MAINTENANCE --- */
+  /* ----- spawn maintenance ----- */
   while(food.length<CFG.foodMax)spawnFood();
   while(foes.length<CFG.foeMax)spawnFoe();
-  if(level>=CFG.titan.unlockLvl){while(titans.length<CFG.titan.max)spawnTitan();}
-  if(titanKill>=CFG.spectre.unlockTitanKills){while(spectres.length<CFG.spectre.max)spawnSpectre();}
-  if(reapersEnabled&&reapers.length<CFG.reaper.max&&reaperSpawnCounter>=CFG.reaper.spawnEvery){
-    spawnReaper();reaperSpawnCounter=0;
+  if(level>=CFG.titan.lvl&&titans.length<CFG.titan.max)spawnTitan();
+  if(titanKill>=CFG.spectre.titanKills&&spectres.length<CFG.spectre.max)spawnSpectre();
+  if(reapersEnabled&&reaperCounter>=CFG.reaper.spawnEvery&&reapers.length<CFG.reaper.max){
+    spawnReaper();reaperCounter=0;
   }
 
-  /* --- UPDATE ENTITIES --- */
+  /* ----- entity updates ----- */
   const upd=(arr,fn)=>{for(let i=arr.length-1;i>=0;i--){if(fn(arr[i])===false)arr.splice(i,1);}};
   upd(food,f=>{if(dist(f,player)<player.r+f.r){player.mass+=f.r*1.2;return false;}});
-  upd(foes,o=>{
-    const d=dist(o,player);
+  upd(foes,o=>{const d=dist(o,player);
     if(player.r>o.r&&d<player.r){player.mass+=o.r*2.5;return false;}
     if(o.r>player.r&&d<o.r)player.mass-=0.02*dt;
   });
-  upd(titans,t=>{
-    const d=dist(t,player);
+  upd(titans,t=>{const d=dist(t,player);
     if(player.r>t.r&&d<player.r){player.mass+=t.r*5;titanKill++;return false;}
     if(t.r>player.r&&d<t.r)player.mass-=0.06*dt;
   });
   upd(spectres,s=>{
-    s.dash-=dt;const d=dist(s,player);
-    if(player.r>s.r&&d<player.r){player.mass+=s.r*7;spectreKill++;reaperSpawnCounter++;return false;}
-    if(s.dash<=0){s.dash=420;const step=s.r>player.r?130:-90;s.x+=(player.x-s.x)/d*step;s.y+=(player.y-s.y)/d*step;}
+    const d=dist(s,player);
+    if(player.r>s.r&&d<player.r){player.mass+=s.r*7;spectreKill++;reaperCounter++;return false;}
+    s.dash=(s.dash||0)-dt;if(s.dash<=0){s.dash=420;const step=s.r>player.r?130:-90;s.x+=(player.x-s.x)/d*step;s.y+=(player.y-s.y)/d*step;}
   });
   upd(reapers,r=>{
-    const d=dist(r,player);r.charge-=dt;
+    if(!reapersEnabled)return false;
+    const d=dist(r,player);r.charge=(r.charge||0)-dt;
     if(player.r>r.r&&d<player.r){player.mass+=r.r*10;return false;}
-    if(r.r>player.r&&d<r.r)player.mass-=CFG.reaper.dmg*dt;
-    if(r.charge<=0){r.charge=REAPER_CHARGE_COOLDOWN;
+    if(r.r>player.r&&d<r.r)player.mass-=REAPER_DMG_RATE*dt;
+    if(r.charge<=0){r.charge=REAPER_COOLDOWN;
       const step=r.r>player.r?REAPER_STEP_BIG:REAPER_STEP_SMALL;r.x+=(player.x-r.x)/d*step;r.y+=(player.y-r.y)/d*step;}
   });
-  upd(amoebas,a=>{
-    a.phase+=(dt*0.005);a.r+=Math.sin(a.phase)*0.8;const d=dist(a,player);
-    if(player.r>a.r&&d<player.r){player.mass+=a.r*3;return false;}
-  });
 
-  /* --- CAMERA & CLEAR --- */
-  cam.update();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
+  /* ----- camera & clear ----- */
+  cam.update(player.r);
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
   ctx.setTransform(cam.z,0,0,cam.z,W/2-player.x*cam.z,H/2-player.y*cam.z);
 
-  /* --- DRAW --- */
-  const drawArr=arr=>arr.forEach(e=>e.insideView&&e.insideView()?e.draw():e.draw());
-  drawArr(food);drawArr(foes);drawArr(titans);drawArr(spectres);drawArr(reapers);drawArr(amoebas);
-  player.tail.unshift({x:player.x,y:player.y});if(player.tail.length>40)player.tail.pop();
-  player.tail.forEach((p,i)=>new Entity(p.x,p.y,player.r*(1-i/player.tail.length),"#00e4b8").draw(0.3));
-  new Entity(player.x,player.y,player.r,"#00e4b8").draw();
+  /* ----- draw ----- */
+  drawTesseract();
+  [...food, ...foes, ...titans, ...spectres, ...reapers].forEach(e=>e.draw());
+  new Ent(player.x,player.y,player.r,"#00e4b8").draw();
 
   /* HUD */
-  hudM.textContent=player.mass.toFixed(0);hudS.textContent=score;hudL.textContent=level;
+  mEl.textContent=player.mass.toFixed(0);sEl.textContent=score;lEl.textContent=level;
 
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
-/* ---------- PAUSE ---------- */
+
+/* ===== pause toggle ===== */
 pauseBtn.onclick=()=>{paused=!paused;pauseBtn.textContent=paused?"▶︎":"⏸︎";};
 </script>
 </body>
