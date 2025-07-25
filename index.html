@@ -33,279 +33,155 @@ canvas{width:100%;height:100%;display:block;touch-action:none;
 <audio id="bgm" src="background-music.mp3" loop preload="auto"></audio>
 
 <script>
-/* ========================================= *\
-   ##  CONSTANTS & HELPERS
-\* ========================================= */
-const CFG = {
-  WORLD_SIZE: 3200,
-  GRID: 160,               // spatial grid cell size
-  FOOD_MAX: 60,
-  FOE_MAX: {basic: 18, titan: 6, spectre: 3, reaper: 3},
-  MASS_THRESH: 600,
-  FRENZY_TIME: 10_000,
-  FRENZY_BONUS_SCALE: 0.4,
-  COLORS: ["#00e4b8","#0ff","#00faff","#22e"],
-  PILL_COLORS:["#00aaff","#ff39ff"],
-  RING_DIST: 1600,
-  CAMERA_MIN_ZOOM: 0.45,
-};
-const rand = (n)=>Math.random()*n-n/2;
-const dist = (ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+/* ========== CONSTANTS & UTILS ========== */
+const CFG={WORLD_SIZE:3200,FOOD_MAX:60,MASS_THRESH:600,RING_DIST:1600,FRENZY_TIME:1e4,
+  FRENZY_BONUS_SCALE:.4,CAMERA_MIN_ZOOM:.45,COLORS:["#00e4b8","#0ff","#00faff","#22e"],
+  PILL_COLORS:["#00aaff","#ff39ff"]};
+const rand=n=>Math.random()*n-n/2;
+const dist=(ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
 const lerp=(a,b,t)=>a+(b-a)*t;
-function mixHex(a,b,t){
-  const A=parseInt(a.slice(1),16),B=parseInt(b.slice(1),16);
+function mixHex(a,b,t){const A=parseInt(a.slice(1),16),B=parseInt(b.slice(1),16);
   const r=lerp(A>>16,B>>16,t)|0,g=lerp(A>>8&255,B>>8&255,t)|0,b2=lerp(A&255,B&255,t)|0;
-  return `rgb(${r},${g},${b2})`;
-}
-/* tiny object-pool to avoid GC in tight loops */
-function Pool(make){const a=[];return()=>a.pop()||make();}
+  return`rgb(${r},${g},${b2})`}
 
-/* ========================================= *\
-   ##  CANVAS & HUD
-\* ========================================= */
+/* ========== CANVAS & HUD ========== */
 const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
 const radarC=document.getElementById('radar'),rctx=radarC.getContext('2d');
-const $mass=document.getElementById('mass'),$score=document.getElementById('score'),$lvl=document.getElementById('level');
+const $m=document.getElementById('mass'),$s=document.getElementById('score'),$l=document.getElementById('level');
 const pauseBtn=document.getElementById('pauseBtn'),radarWrap=document.getElementById('radarWrap');
 let W=innerWidth,H=innerHeight;const resize=()=>{W=canvas.width=innerWidth;H=canvas.height=innerHeight};addEventListener('resize',resize);resize();
 
-/* ========================================= *\
-   ##  GAME STATE CLASSES
-\* ========================================= */
-class Entity{
-  constructor(x=0,y=0,r=6){this.x=x;this.y=y;this.r=r;this.vx=0;this.vy=0;this.flash=0}
-  step(dt){} draw(){} die(){}
-}
-class Player extends Entity{
-  constructor(){super(0,0,15);this.mass=10;this.tail=[];this.speedBoost=0}
-  radius(){return 10+Math.sqrt(this.mass)*1.6}
-}
-class Food extends Entity{
-  constructor(){super();this.frenzy=false;this.cx=0;this.cy=0;this.ang=0;this.baseR=0;this.angV=0}
-  step(dt){
-    if(this.frenzy){
-      this.ang+=this.angV*dt;
-      this.x=this.cx+Math.cos(this.ang)*this.baseR;
-      this.y=this.cy+Math.sin(this.ang)*this.baseR;
-    }
-  }
-}
-/* subclasses for foes just set behaviour flags */
-class Foe extends Entity{constructor(type){super();this.type=type}}
-/* pill */
-let pill={active:false,x:0,y:0,r:10,cd:0};
+/* ========== SIMPLE POOL ========== */
+const Pool=make=>{const a=[];return()=>a.pop()||make()};
 
-/* ========================================= *\
-   ##  WORLD & SPATIAL GRID
-\* ========================================= */
+/* ========== ENTITIES ========== */
+class Ent{constructor(r=6){this.x=0;this.y=0;this.r=r}}
+class Player extends Ent{constructor(){super(15);this.mass=10;this.tail=[];this.boost=0}
+  rad(){return 10+Math.sqrt(this.mass)*1.6}}
+class Food extends Ent{constructor(){super();this.frenzy=false;this.cx=this.cy=0;this.ang=this.baseR=this.angV=0}
+  step(dt){if(this.frenzy){this.ang+=this.angV*dt;this.x=this.cx+Math.cos(this.ang)*this.baseR;
+                            this.y=this.cy+Math.sin(this.ang)*this.baseR}}}
+
+const foodPool=Pool(()=>new Food());
+const foePool=Pool(()=>new Ent());
+
+/* ========== WORLD ARRAYS ========== */
 const player=new Player();
 const food=[],foes=[],titans=[],spectres=[],reapers=[],beacons=[];
-
-/* populate starters */
 for(let i=0;i<CFG.FOOD_MAX;i++)spawnFood();
-['N','S','E','W'].forEach(dir=>{
-  const pos={N:[0,-CFG.RING_DIST],S:[0,CFG.RING_DIST],E:[CFG.RING_DIST,0],W:[-CFG.RING_DIST,0]}[dir];
-  beacons.push({x:pos[0],y:pos[1],r:18});
-});
+['N','S','E','W'].forEach(d=>{const p={N:[0,-CFG.RING_DIST],S:[0,CFG.RING_DIST],E:[CFG.RING_DIST,0],W:[-CFG.RING_DIST,0]}[d];
+  beacons.push({x:p[0],y:p[1],r:18})});
 
-function spawnFood(){
-  const f=foodPool();f.x=rand(1800);f.y=rand(1800);f.r=6;f.frenzy=false;
-  food.push(f);
-}
-function spawnFoe(){
-  const e=foePool('basic');
-  e.x=rand(2000);e.y=rand(2000);
-  e.r=(player.mass>=CFG.MASS_THRESH?14:10)+Math.random()*20;
-  foes.push(e);
-}
-function spawnTitan(){
-  const t=foePool('titan');
-  arcSpawn(t,700,500);t.r=25+Math.random()*35;t.hop=0;titans.push(t);
-}
-function spawnSpectre(){
-  const s=foePool('spectre');
-  arcSpawn(s,600,400);s.r=22+Math.random()*25;s.dash=0;spectres.push(s);
-}
-function spawnReaper(){
-  const r=foePool('reaper');
-  arcSpawn(r,800,600);r.r=38+Math.random()*28;r.charge=0;reapers.push(r);
-}
-function arcSpawn(o,base,variance){
-  const a=Math.random()*Math.PI*2,d=base+Math.random()*variance;
-  o.x=player.x+Math.cos(a)*d;o.y=player.y+Math.sin(a)*d;
-}
-/* --- pools --- */
-const foodPool=Pool(()=>new Food());
-const foePool=(type)=>{const p=foePools[type]();p.type=type;return p};
-const foePools={
-  basic:Pool(()=>new Foe('basic')),
-  titan:Pool(()=>new Foe('titan')),
-  spectre:Pool(()=>new Foe('spectre')),
-  reaper:Pool(()=>new Foe('reaper'))
-};
+/* ========== CAMERA ========== */
+const cam={zoom:1,tx:0,ty:0};
+function toWorld(px,py){return{x:(px-cam.tx)/cam.zoom,y:(py-cam.ty)/cam.zoom}}
 
-/* ========================================= *\
-   ##  INPUT
-\* ========================================= */
+/* ========== INPUT ========== */
 let target={x:0,y:0,active:false};
-canvas.addEventListener('pointerdown',e=>{if(!paused){setTarget(e);target.active=true}});
-canvas.addEventListener('pointermove',e=>{if(target.active&&!paused)setTarget(e)});
+canvas.addEventListener('pointerdown',e=>{if(!paused){const w=toWorld(e.clientX,e.clientY);target=w;target.active=true}});
+canvas.addEventListener('pointermove',e=>{if(target.active&&!paused){const w=toWorld(e.clientX,e.clientY);target=w}});
 addEventListener('pointerup',()=>target.active=false);
-function setTarget(ev){target.x=ev.clientX-offset.x;target.y=ev.clientY-offset.y}
 
-/* ========================================= *\
-   ##  MUSIC & PAUSE
-\* ========================================= */
+/* ========== MUSIC & PAUSE ========== */
 let paused=false;const bgm=document.getElementById('bgm');
 pauseBtn.onclick=()=>{paused=!paused;pauseBtn.textContent=paused?'▶︎':'⏸︎';paused?bgm.pause():bgm.play().catch(()=>{})};
 addEventListener('pointerdown',()=>{if(!paused)bgm.play().catch(()=>{})},{once:true});
 
-/* ========================================= *\
-   ##  GAME LOOP
-\* ========================================= */
-let last=0,level=1,flash=0,frenzy=false,F_TIME=0,frenzyLeft=0,bonusFlash=0;
+/* ========== GAMEPLAY STATE VARS ========== */
+let last=0,level=1,flash=0,frenzy=false,F_TIME=0,fLeft=0,bonusFlash=0;
 let titanKills=0,spectreKills=0,reaperGrace=6000,radarActive=false;
-const offset={x:W/2,y:H/2};
+const pill={active:false,x:0,y:0,r:10,cd:0};
+
+/* ========== SPAWNERS ========== */
+function spawnFood(){const f=foodPool();f.x=rand(1800);f.y=rand(1800);f.r=6;f.frenzy=false;food.push(f)}
+function spawnFoe(){const e=foePool();e.x=rand(2000);e.y=rand(2000);
+  e.r=(player.mass>=CFG.MASS_THRESH?14:10)+Math.random()*20;foes.push(e)}
+function arcSpawn(arr,min,span,r){const e=foePool();const a=Math.random()*6.283,d=min+Math.random()*span;
+  e.x=player.x+Math.cos(a)*d;e.y=player.y+Math.sin(a)*d;e.r=r();arr.push(e);return e}
+const spawnTitan=()=>arcSpawn(titans,700,500,()=>25+Math.random()*35);
+const spawnSpectre=()=>arcSpawn(spectres,600,400,()=>22+Math.random()*25);
+const spawnReaper=()=>arcSpawn(reapers,800,600,()=>38+Math.random()*28);
+
+/* ========== MAIN LOOP ========== */
 requestAnimationFrame(loop);
 function loop(ts){
   const dt=(ts-last)||16;last=ts;if(paused){requestAnimationFrame(loop);return}
 
-  /* ----- Input & Move ----- */
-  movePlayer(dt);
-  player.mass=Math.max(5,player.mass-massDecay(dt));
+  /* camera first (so input this frame uses up-to-date tx/ty) */
+  cam.zoom=Math.max(CFG.CAMERA_MIN_ZOOM,Math.min(1,300/player.rad()));
+  cam.tx=W/2-player.x*cam.zoom;cam.ty=H/2-player.y*cam.zoom;
+  ctx.setTransform(cam.zoom,0,0,cam.zoom,cam.tx,cam.ty);
 
-  /* ----- Entity Updates & Collisions ----- */
-  updateFood(dt);manageSpawns(dt);
-  handleCollisions(food,'food');handleCollisions(foes,'foe');
-  handleCollisions(titans,'titan');handleCollisions(spectres,'spectre');
-  handleCollisions(reapers,'reaper');beaconCheck();
-
-  /* ----- Camera ----- */
-  const zoom=Math.max(CFG.CAMERA_MIN_ZOOM,Math.min(1,300/player.radius()));
-  ctx.setTransform(zoom,0,0,zoom,offset.x,offset.y);
-
-  /* ----- Render ----- */
-  ctx.clearRect(-offset.x/zoom,-offset.y/zoom,W/zoom,H/zoom);
-  drawTesseract();
-  drawAll();
-
-  /* ----- HUD ----- */
-  $mass.textContent=player.mass.toFixed(0);
-  $score.textContent=Math.floor(player.mass*10);
-  if(frenzy){$lvl.textContent=`FRENZY ${Math.ceil(F_TIME/1000)}`;$lvl.style.color=bonusFlash&&bonusFlash--%2?'#ff0':'#ff39ff'}
-  else{$lvl.textContent=level;$lvl.style.color=flash&&flash--%2?'#ff0':'#fff'}
-
-  requestAnimationFrame(loop);
+  movePlayer(dt);updateFood(dt);spawns(dt);collisions(dt);render(ts);
+  hud();requestAnimationFrame(loop)
 }
 
-/* ========================================= *\
-   ##  SUB-SYSTEMS
-\* ========================================= */
+/* ========== SUBSYSTEMS ========== */
 function movePlayer(dt){
   const dx=(target.active?target.x:player.x)-player.x,
         dy=(target.active?target.y:player.y)-player.y,
         len=Math.hypot(dx,dy)||1;
-  if(player.speedBoost>0)player.speedBoost=Math.max(0,player.speedBoost-dt);
-  const speed=(2.5+0.25*(level-1))*(player.speedBoost>0?1.25:1)*(frenzy?1.3:1);
-  player.x+=dx/len*speed;player.y+=dy/len*speed;
-  player.r=player.radius();
-  offset.x=W/2-player.x*zoom;offset.y=H/2-player.y*zoom;
-
-  player.tail.unshift({x:player.x,y:player.y});
+  if(player.boost>0)player.boost=Math.max(0,player.boost-dt);
+  const sp=(2.5+0.25*(level-1))*(player.boost?1.25:1)*(frenzy?1.3:1);
+  player.x+=dx/len*sp;player.y+=dy/len*sp;
+  player.r=player.rad();player.tail.unshift({x:player.x,y:player.y});
   if(player.tail.length>player.mass/3)player.tail.pop();
+  player.mass=Math.max(5,player.mass-((.000009*player.r*player.r)+(player.mass<150?.002:.003))*dt)
 }
-function massDecay(dt){return (0.000009*player.r*player.r+(player.mass<150?0.002:0.003))*dt}
-function updateFood(dt){
-  for(const f of food)f.step(dt);
-  while(food.length<CFG.FOOD_MAX)spawnFood();
+function updateFood(dt){for(const f of food)f.step(dt);while(food.length<CFG.FOOD_MAX)spawnFood()}
+function spawns(dt){
+  while(foes.length<(player.mass>=CFG.MASS_THRESH?18:12))spawnFoe();
+  if(level>=10)while(titans.length<6)spawnTitan();
+  if(titanKills>=10)while(spectres.length<3)spawnSpectre();
+  if(reaperGrace>0)reaperGrace-=dt
 }
-function manageSpawns(dt){
-  /* basic foes */
-  while(foes.length<(player.mass>=CFG.MASS_THRESH?CFG.FOE_MAX.basic:12))spawnFoe();
-  /* titans */
-  if(level>=10)while(titans.length<CFG.FOE_MAX.titan)spawnTitan();
-  /* spectres */
-  if(titanKills>=10)while(spectres.length<CFG.FOE_MAX.spectre)spawnSpectre();
-  /* reapers grace period */
-  if(reaperGrace>0)reaperGrace-=dt;
+function collisions(dt){
+  handle(food,(f,i)=>{player.mass+=f.r*(f.frenzy?.6:1.2);
+    if(f.frenzy&&!--fLeft){const secs=Math.max(1,Math.ceil(F_TIME/1000));
+      player.mass+=Math.min(400,40*Math.sqrt(level))*secs*CFG.FRENZY_BONUS_SCALE;bonusFlash=60}
+    food.splice(i,1)});
+  handle(foes,(e,i)=>eatLogic(e,i,2.5,.04));
+  handle(titans,(e,i)=>eatLogic(e,i,5,.1,()=>titanKills++));
+  handle(spectres,(e,i)=>eatLogic(e,i,7,.2,()=>{
+    player.boost=6e3;++spectreKills;if(!(spectreKills%6)&&reapers.length<3&&reaperGrace<=0)spawnReaper()}));
+  handle(reapers,(e,i)=>eatLogic(e,i,10,.25));
+  beacons.forEach((b,i)=>{if(dist(player.x,player.y,b.x,b.y)<player.r+b.r){beacons.length=0;radarActive=true;radarWrap.style.display='block'}})
 }
-function handleCollisions(list,type){
-  for(let i=list.length-1;i>=0;i--){
-    const e=list[i];
-    if(dist(player.x,player.y,e.x,e.y)<player.r+e.r){
-      switch(type){
-        case 'food':
-          player.mass+=e.r*(e.frenzy?0.6:1.2);
-          if(e.frenzy){frenzyLeft--;if(!frenzyLeft){const secs=Math.max(1,Math.ceil(F_TIME/1000));player.mass+=Math.min(400,40*Math.sqrt(level))*secs*CFG.FRENZY_BONUS_SCALE;bonusFlash=60}}
-          eDie(list,i,'food');continue;
-        case 'foe':
-          consumeLogic(e,list,i,2.5,0.04);continue;
-        case 'titan':
-          consumeLogic(e,list,i,5,0.1,()=>{titanKills++});continue;
-        case 'spectre':
-          consumeLogic(e,list,i,7,0.2,()=>{
-            player.speedBoost=6000;spectreKills++;
-            if(spectreKills%6===0&&reapers.length<CFG.FOE_MAX.reaper&&reaperGrace<=0)spawnReaper();
-          });continue;
-        case 'reaper':
-          consumeLogic(e,list,i,10,0.25);continue;
-      }
-    }
-    /* simple chase / flee AI */
-    if(type==='foe'||type==='titan'||type==='spectre'||type==='reaper'){
-      const d=dist(player.x,player.y,e.x,e.y);const dirX=(player.x-e.x)/d,dirY=(player.y-e.y)/d;
-      const chase=e.r>player.r,range=250+(e.r>player.r?100:0);
-      if(d<range){e.x+=dirX*(chase?-1:1);e.y+=dirY*(chase?-1:1)}
-    }
-  }
-}
-function consumeLogic(e,arr,idx,feed,grow,onKill){
-  if(player.r>e.r){player.mass+=e.r*feed;arr.splice(idx,1);onKill&&onKill()}
-  else{player.mass=Math.max(5,player.mass-grow);player.flash=700}
-}
-function beaconCheck(){
-  for(let i=beacons.length-1;i>=0;i--){
-    const b=beacons[i];if(dist(player.x,player.y,b.x,b.y)<player.r+b.r){beacons.length=0;radarActive=true;radarWrap.style.display='block'}
-  }
-}
-
-/* ========================================= *\
-   ##  DRAW
-\* ========================================= */
-function drawAll(){
-  // food & pill first
-  for(const f of food)drawGlow(f.x,f.y,f.r,f.frenzy?f.col:'#ff0',f.frenzy?0.8:0.65);
-  if(pill.active){const ph=(Math.sin(last*0.005)+1)/2;drawGlow(pill.x,pill.y,pill.r,mixHex(...CFG.PILL_COLORS,ph),0.95)}
-  // foes
-  for(const e of foes)drawGlow(e.x,e.y,e.r,'#f00',0.8);
-  for(const t of titans)drawGlow(t.x,t.y,t.r,'#cc00ff',0.9);
-  for(const s of spectres){const ph=(Math.sin((last+s.x)*0.006)+1)/2;drawGlow(s.x,s.y,s.r,mixHex('#ffde59','#ff39ff',ph),0.9)}
-  for(const r of reapers){const ph=(Math.sin((last+r.y)*0.004)+1)/2;drawGlow(r.x,r.y,r.r,mixHex('#ff8800','#ff39ff',ph),0.9)}
-  // beacons
-  for(const b of beacons){const ph=(Math.sin(last*0.004)+1)/2;drawGlyphR(b.x,b.y,b.r*1.1,mixHex('#00e4ff','#ff39ff',ph))}
-  // tail then player
-  player.tail.forEach((p,i)=>drawGlow(p.x,p.y,player.r*(1-i/player.tail.length),mixHex('#00e4b8','#ff39ff',i/player.tail.length),0.3));
-  drawGlow(player.x,player.y,player.r,player.flash>0?(player.flash%200<100?'#fff':'#ff44ff'):'#00e4b8',1);
-
-  // radar
-  if(radarActive){rctx.clearRect(0,0,70,70);rctx.strokeStyle='#666';rctx.lineWidth=1;
-    rctx.beginPath();rctx.moveTo(35,0);rctx.lineTo(35,70);rctx.moveTo(0,35);rctx.lineTo(70,35);rctx.stroke();
+function handle(arr,fn){for(let i=arr.length;i--;)if(dist(player.x,player.y,arr[i].x,arr[i].y)<player.r+arr[i].r)fn(arr[i],i)}
+function eatLogic(e,idx,gain,hit,onKill){
+  if(player.r>e.r){player.mass+=e.r*gain;thisArr(idx);onKill&&onKill()}
+  else player.mass=Math.max(5,player.mass-hit*16)}function thisArr(i){this.splice(i,1)}
+function render(t){
+  ctx.clearRect(( -cam.tx)/cam.zoom,( -cam.ty)/cam.zoom,W/cam.zoom,H/cam.zoom);drawGrid();
+  food.forEach(f=>glow(f.x,f.y,f.r,f.frenzy?f.col:'#ff0',f.frenzy?.8:.65));
+  if(pill.active){const ph=(Math.sin(t*.005)+1)/2;glow(pill.x,pill.y,pill.r,mixHex(...CFG.PILL_COLORS,ph),.95)}
+  foes.forEach(e=>glow(e.x,e.y,e.r,'#f00',.8));
+  titans.forEach(e=>glow(e.x,e.y,e.r,'#cc00ff',.9));
+  spectres.forEach(s=>{const ph=(Math.sin((t+s.x)*.006)+1)/2;glow(s.x,s.y,s.r,mixHex('#ffde59','#ff39ff',ph),.9)});
+  reapers.forEach(r=>{const ph=(Math.sin((t+r.y)*.004)+1)/2;glow(r.x,r.y,r.r,mixHex('#ff8800','#ff39ff',ph),.9)});
+  beacons.forEach(b=>{const ph=(Math.sin(t*.004)+1)/2;glyph(b.x,b.y,b.r*1.1,mixHex('#00e4ff','#ff39ff',ph))});
+  player.tail.forEach((p,i)=>glow(p.x,p.y,player.r*(1-i/player.tail.length),mixHex('#00e4b8','#ff39ff',i/player.tail.length),.3));
+  glow(player.x,player.y,player.r,'#00e4b8',1);
+  if(radarActive){rctx.clearRect(0,0,70,70);rctx.strokeStyle='#666';rctx.beginPath();
+    rctx.moveTo(35,0);rctx.lineTo(35,70);rctx.moveTo(0,35);rctx.lineTo(70,35);rctx.stroke();
     const m=Math.max(CFG.RING_DIST,Math.abs(player.x),Math.abs(player.y))||1,sc=(30-4)/m;
-    rctx.fillStyle='#00e4b8';rctx.beginPath();rctx.arc(35+player.x*sc,35+player.y*sc,3,0,6.283);rctx.fill();}
+    rctx.fillStyle='#00e4b8';rctx.beginPath();rctx.arc(35+player.x*sc,35+player.y*sc,3,0,6.283);rctx.fill()}
 }
-function drawGlow(x,y,r,c,a){ctx.save();ctx.globalAlpha=a;ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;
+function hud(){
+  $m.textContent=player.mass.toFixed(0);$s.textContent=Math.floor(player.mass*10);
+  if(frenzy){$l.textContent=`FRENZY ${Math.ceil(F_TIME/1000)}`;$l.style.color=bonusFlash&&bonusFlash--%2?'#ff0':'#ff39ff'}
+  else{$l.textContent=level;$l.style.color=flash&&flash--%2?'#ff0':'#fff'}
+}
+function glow(x,y,r,c,a){ctx.save();ctx.globalAlpha=a;ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;
   ctx.beginPath();ctx.arc(x,y,r,0,6.283);ctx.fill();ctx.restore()}
-function drawGlyphR(x,y,r,c){ctx.save();ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;
+function glyph(x,y,r,c){ctx.save();ctx.shadowBlur=12;ctx.shadowColor=c;ctx.fillStyle=c;
   ctx.font=`${r*2}px Inter`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('R',x,y);ctx.restore()}
-function drawTesseract(){
-  ctx.lineWidth=1.2;const step=120,d=6;
-  for(let z=0;z<d;z++){const s=1+z*0.15,o=0.8-0.12*z;ctx.strokeStyle=`rgba(34,34,34,${o})`;
+function drawGrid(){ctx.lineWidth=1.2;const step=120,d=6;
+  for(let z=0;z<d;z++){const s=1+z*.15,o=.8-.12*z;ctx.strokeStyle=`rgba(34,34,34,${o})`;
     for(let i=-4;i<=4;i++)for(let j=-4;j<=4;j++){const x=i*step*s,y=j*step*s,l=step*s;
       ctx.strokeRect(x,y,l,l);
-      ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-l*0.4,y-l*0.4);ctx.lineTo(x-l*0.4+l,y-l*0.4);ctx.lineTo(x+l,y);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(x+l,y);ctx.lineTo(x+l+l*0.4,y-l*0.4);ctx.lineTo(x+l+l*0.4-l,y-l*0.4+l);ctx.lineTo(x+l,y+l);ctx.stroke();
-    }}
-}
+      ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-l*.4,y-l*.4);ctx.lineTo(x-l*.4+l,y-l*.4);ctx.lineTo(x+l,y);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x+l,y);ctx.lineTo(x+l+l*.4,y-l*.4);ctx.lineTo(x+l+l*.4-l,y-l*.4+l);ctx.lineTo(x+l,y+l);ctx.stroke()}}}
 </script>
 </body>
 </html>
